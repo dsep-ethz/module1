@@ -1,0 +1,992 @@
+---
+title: "Cloud-native data in R"
+subtitle: "GBIF, NDVI and socio-political data, without downloading them"
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-tools: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+# Overview
+
+**Prerequisites:** basic R (data frames, `ggplot2`, the pipe). **Time:** four sessions of about 90 minutes (started in class, finish outside of class).
+
+::: {.callout-tip title="Peer programming"}
+You will code with a partner (or small group) throughout the course. The **driver** controls the keyboard and explains what they are doing; the **navigator** asks questions, checks the output, and helps spot problems. Switch roles every 10–15 minutes and before starting each new exercise (an excuse to push and pull code from github).
+
+Both partners should be able to explain the code. When something fails, read the message together, say what you think happened, and change one thing at a time. Questions and friction are part of the work!
+:::
+
+::: {.callout-note title="New to the tidyverse?"}
+Start with the free [R for Data Science introduction](https://r4ds.hadley.nz/intro.html) to learn the pipe and the main `dplyr` verbs used here. The [tidyverse learning page](https://www.tidyverse.org/learn/) collects more tutorials and package-specific resources.
+
+You do not need to master everything first. Focus on `filter()`, `select()`, `group_by()`, `summarise()`, and `ggplot()`.
+:::
+
+In this module you will query large, remote datasets **without downloading the full datasets**. Each session follows the same workflow:
+
+1.  **Find the data.** Use a catalogue or a documented data address.
+2.  **Point R to the data.** Create a connection or a lazy object; this does not load the full dataset into memory.
+3.  **Narrow the data.** Use familiar `dplyr` verbs such as `filter()`, `select()`, `group_by()`, and `summarise()`.
+4.  **Collect a small/synthesized result.** Use `collect()` only after the remote data have been reduced to a manageable answer.
+
+You will mostly write tidyverse-style pipelines. A few specialist packages connect R to databases, catalogues, and satellite files, but they all support the same basic idea: **find, connect, narrow, collect**.
+
+These technical tools are used across many fields and for many kinds of questions. In this module, we will learn them through a shared topic: how biodiversity data are **produced, accessed, and used in policy**. By Session 4 you will investigate a social or political dimension of global biodiversity data and explain what the observed pattern could mean for policy.
+
+| Session | Data | What you learn to query | Your task |
+|------------------|------------------|------------------|------------------|
+| 1 | GBIF occurrence records | Remote Parquet files with Arrow and `dplyr` | Write a query for a taxon or place you choose |
+| 2 | Sentinel-2 satellite imagery | A STAC catalogue | Compute an index for a place you choose |
+| 3 | Socio-political indicators | An indicator catalogue, then a local table | Write queries on indicators you choose |
+| 4 | GBIF and socio-political data, with imagery optional | A social or political question about biodiversity data | Your own analysis and a short policy interpretation |
+
+Sessions 1 to 3 can each be run on their own. Session 4 builds mainly on Sessions 1 and 3; Session 2 provides an optional extension. Run the relevant earlier sessions in the same R session before starting Session 4.
+
+## Where the data live
+
+Environmental data do not all sit in one place. Governments, research networks, space agencies, and international organisations publish data through several common kinds of infrastructure:
+
+- **Data portals and catalogues** help people search for datasets and read their descriptions.
+- **APIs and STAC catalogues** let code search a service and request selected records or files.
+- **Cloud object storage**, such as Amazon S3, holds large files that tools such as Arrow and `terra` can read directly.
+- **Repositories and institutional servers** hold many smaller or specialised datasets.
+
+Usually you start at the organisation's website or a data catalogue, not by guessing a cloud address. The catalogue or documentation then points to the API, bucket, or files. The organisation remains the data provider even when a commercial cloud service hosts the bytes.
+
+Before writing code, identify both the **discovery point** that helps you find and understand the data and the **storage or service address** that R will connect to.
+
+| Dataset | Where a person starts | What R connects to | R tools used here |
+|------------------|------------------|------------------|------------------|
+| GBIF occurrences | [GBIF occurrence snapshots](https://www.gbif.org/occurrence-snapshots) or its entry in the [Registry of Open Data on AWS](https://registry.opendata.aws/gbif/) | Parquet files in a public S3 bucket maintained for GBIF | `arrow`, then `dplyr` |
+| Sentinel-2 imagery | A mission portal or a catalogue such as [Earth Search](https://earth-search.aws.element84.com/v1) | A STAC API, then Cloud Optimized GeoTIFFs in object storage | `rstac`, `terra`, then tidyverse-style summaries |
+| World Bank indicators | The [World Bank Data Catalog](https://datacatalog.worldbank.org/) or the catalogue searched by `WDIsearch()` | The World Bank API | `WDI`, then `dplyr` |
+
+A **catalogue is not usually the data itself**. It is more like a library catalogue: it describes what exists and gives you the address of the relevant files. STAC, which stands for [SpatioTemporal Asset Catalog](https://stacspec.org/), does this for spatial data. You search it by collection, place, and time; it returns metadata and links to matching files.
+
+For GBIF, the S3 address below is not something you would be expected to invent. GBIF documents its snapshots, and the open-data registry lists the available buckets and regions. We use the `eu-central-1` replica because it is geographically closer to this course; it contains the same published snapshot structure as the other regional replicas.
+
+::: {.callout-important title="Keep this workflow in view"}
+For every example, ask:
+
+1.  Where does this dataset live?
+2.  How did we find the relevant table, file, or image?
+3.  Which operations happen remotely?
+4.  At what line does a small result enter R?
+:::
+
+## Setup
+
+```{r}
+#| label: install
+install.packages(c(
+  "tidyverse",                           # data wrangling and plotting
+  "arrow",                               # large remote Parquet tables
+  "rstac", "terra",                     # catalogues and rasters
+  "httr2",                               # network checks
+  "WDI"                                  # World Bank indicators
+))
+```
+
+```{r}
+#| label: setup
+library(tidyverse)
+library(arrow)
+library(httr2)
+
+dir.create("cache", showWarnings = FALSE)   # saved results live here
+```
+
+Most of the code you write uses tidyverse functions. The other packages connect to data that an ordinary R data frame cannot open directly: Arrow reads large remote Parquet tables, `rstac` searches satellite catalogues, `terra` reads raster pixels, and `WDI` requests World Bank indicators.
+
+Check that your network can reach the three services we use. University networks sometimes block S3.
+
+```{r}
+#| label: network-check
+hosts <- c(
+  GBIF      = "https://gbif-open-data-eu-central-1.s3.eu-central-1.amazonaws.com/",
+  STAC      = "https://earth-search.aws.element84.com/v1",
+  WorldBank = "https://api.worldbank.org/v2/country/CH?format=json"
+)
+
+status <- sapply(hosts, function(u) {
+  tryCatch(
+    request(u) |> req_error(is_error = \(r) FALSE) |> req_perform() |> resp_status(),
+    error = \(e) NA_integer_
+  )
+})
+tibble(service = names(status), http_status = status, reachable = !is.na(status))
+```
+
+Any number means the host answered. `NA` means it is blocked - let us know and we can help troubleshoot this!
+
+# Session 1: GBIF and querying remote tables
+
+## What is GBIF?
+
+The [Global Biodiversity Information Facility (GBIF)](https://www.gbif.org/) is an international network and data infrastructure that provides open access to biodiversity records contributed by museums, universities, government agencies, research projects, citizen-science platforms, and other publishers.
+
+Most rows in the dataset are **occurrence records**: evidence that an organism was observed or collected at a particular place and time. A record might come from a preserved specimen, a field survey, or a photographed observation. GBIF brings these records together and standardizes their fields, but it does not represent every species or place equally. Who collects and publishes records shapes what appears in the data.
+
+## The idea: cloud native
+
+The traditional workflow is **download, then analyse**. You copy the whole file to your laptop, then throw most of it away.
+
+The cloud-native workflow allows you to just **ask for the bytes you need**. The data stays in cloud object storage (for example Amazon S3) and you read only the parts you want, over ordinary HTTPS.
+
+```{mermaid}
+flowchart LR
+  subgraph dl [Download first]
+    A[Archive] --> B[Copy everything to laptop] --> C[Filter and analyse]
+  end
+  subgraph cn [Cloud native]
+    D[Catalogue and file metadata] --> E[Request only the bytes needed] --> F[Analyse the small result]
+  end
+```
+
+Three things make this work:
+
+1.  **Object storage over HTTP:** Files sit at a URL. A server that supports *range requests* will return any slice of a file: "give me bytes 1000 to 2000".
+2.  **Formats designed for partial reads:**
+    - *Parquet* is columnar (like a csv/data table). A query that needs one column reads one column.
+    - *Cloud Optimized GeoTIFF (COG)* is internally tiled, with built-in lower-resolution overviews. Reading a small window reads a few tiles. (Session 2.)
+3.  **Catalogues that describe the data:** You search by place, time and other metadata, and the catalogue tells you where the files are. (Sessions 2 and 3.)
+
+## What is a query?
+
+A **query** is a question you send to a data engine, which sends back only the answer. The pattern is always the same:
+
+> **filter** the rows you want, **group** them, **summarize** each group, and only then **collect** the (small) result into R.
+
+**Arrow** lets `dplyr` work directly with Parquet files, including files stored in the cloud. You use the same verbs as with a local tibble (dataframe). The main new function is `collect()`, which brings a finished result of the query into R.
+
+## Find and open the GBIF snapshot
+
+GBIF publishes dated snapshots of its occurrence records as folders of Parquet files in public Amazon S3 buckets. The [GBIF snapshot page](https://www.gbif.org/occurrence-snapshots) provides the dates and citation information, while the [open-data registry entry](https://registry.opendata.aws/gbif/) documents the bucket addresses and regional replicas. The snapshot date identifies a fixed version of the data. Arrow can treat the whole folder as one dataset.
+
+```{r}
+#| label: gbif-open
+snapshot <- "2024-10-01"
+
+gbif_address <- paste0(
+  "s3://anonymous@gbif-open-data-eu-central-1/occurrence/",
+  snapshot,
+  "/occurrence.parquet?region=eu-central-1"
+)
+
+gbif <- open_dataset(gbif_address, format = "parquet")
+```
+
+`gbif_address` tells Arrow where the files live. `open_dataset()` reads their structure, not the billions of records themselves. From this point onward, treat `gbif` like a data frame: write a `dplyr` pipeline, reduce it to a small answer, and end with `collect()`.
+
+::: {.callout-important title="Working with the remote dataset"}
+- `gbif` points to files on S3: use familiar `dplyr` verbs, then `collect()` a small result.
+- Never call `collect()` on the full GBIF dataset.
+:::
+
+## Explore GBIF with dplyr
+
+```{r}
+#| label: gbif-columns
+names(gbif)   # column names only; no occurrence records are downloaded
+```
+
+::: {.callout-note title="Exercise 1.1"}
+Scan the columns. Which would you use to (a) filter by taxon, (b) filter by place, (c) filter by time, (d) judge data quality?
+:::
+
+Ask Arrow to count the records. `summarise()` creates a one-row answer on S3; `collect()` brings that one row into R.
+
+```{r}
+#| label: gbif-count
+
+system.time({ #check how long the query takes
+  total_records <- gbif |>
+    summarise(n = n()) |>
+    collect()
+})
+
+total_records
+```
+
+Peek at five rows while selecting only useful columns.
+
+```{r}
+#| label: gbif-head
+gbif |>
+  select(gbifid, species, countrycode, year, basisofrecord) |>
+  head(5) |>
+  collect()
+```
+
+::: {.callout-important title="Three rules for remote data"}
+1.  Use `filter()` and `select()` early so Arrow reads less data.
+2.  Use `count()` or `summarise()` before `collect()`.
+3.  After `collect()`, the small result is an ordinary tibble that you can plot or save.
+:::
+
+## Try it: records per country
+
+This query needs **one column** (`countrycode`), so Arrow reads only that column from every file. Expect one to a few minutes depending on your network. The result is saved so you never repeat the wait.
+
+Read the pipeline from top to bottom:
+
+1.  `filter()` removes records without a country code.
+2.  `count()` groups the remaining records by country and counts them with Arrow.
+3.  `collect()` brings the small country-level table into R.
+4.  `saveRDS()` saves that small result locally so the large query is not repeated.
+
+```{r}
+#| label: gbif-country
+cache <- "cache/country_counts.rds"
+
+if (file.exists(cache)) {
+  country_counts <- readRDS(cache)
+} else {
+  country_counts <- gbif |>
+    filter(!is.na(countrycode)) |>
+    count(countrycode, name = "n_records", sort = TRUE) |>
+    collect()                      # the only moment data comes back to R
+  saveRDS(country_counts, cache)
+}
+
+head(country_counts, 10)
+```
+
+A query over billions of rows returned about 250 rows. That small result is an ordinary R data frame, so `ggplot2` works.
+
+```{r}
+#| label: gbif-plot
+country_counts |>
+  slice_max(n_records, n = 20) |>
+  mutate(countrycode = reorder(countrycode, n_records)) |>
+  ggplot(aes(n_records, countrycode)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::label_comma()) +
+  labs(x = "GBIF occurrence records", y = NULL,
+       title = "Top 20 countries by number of GBIF records",
+       caption = paste("GBIF snapshot", snapshot))
+```
+
+Add a filter to ask how records from Switzerland are split by basis of record. The pipeline remains lazy until `collect()`.
+
+```{r}
+#| label: gbif-ch
+ch <- gbif |>
+  filter(countrycode == "CH") |>
+  count(basisofrecord, sort = TRUE)
+
+collect(ch)
+```
+
+## Try it: birds per country
+
+::: {.callout-note title="Task"}
+Count records of birds (class `Aves`) per country and list the top 10.
+:::
+
+```{r}
+#| label: turn-1-2
+#| eval: false
+bird_counts <- gbif |>
+  filter(class == ___) |>
+  count(___, name = "n_records", sort = TRUE) |>
+  head(___) |>
+  collect()
+
+bird_counts
+```
+
+::: {.callout-tip title="Solution (try first)" collapse="true"}
+``` r
+bird_counts <- gbif |>
+  filter(class == "Aves") |>
+  count(countrycode, name = "n_records", sort = TRUE) |>
+  head(10) |>
+  collect()
+```
+:::
+
+## Your query 1: ask GBIF your own question
+
+::: {.callout-note title="Task"}
+Write a query that answers a question of your choice. Pick one below, or come up with your own:
+
+- Records **per year** for a taxonomic group you care about. Plot the trend.
+- The **top 10 species** recorded in one country (`filter()` on `countrycode`, `count()` on `species`).
+- Records of a group **per year in one country**. Session 4 uses this kind of summary to ask who and what are represented in biodiversity data, so think about which parts of the country are (not) covered.
+- The share of each **basis of record** per year. What does this say about how the data are collected?
+- Records per **kingdom** or **phylum**. Which parts of life are poorly recorded?
+:::
+
+Your query should have these parts:
+
+1.  a `filter()` that narrows the rows,
+2.  a `group_by()` or `count()`,
+3.  a summary (`n()`, `n_distinct()`, `mean()`),
+4.  `collect()` at the end, so you bring back a **small** result,
+5.  a plot or table of the result.
+
+Then write two sentences: which columns did Arrow have to read, and why was that much faster than downloading the snapshot?
+
+Hint: `n_distinct(species)` over the whole snapshot is much heavier than counting rows. Try it on one country first.
+
+```{r}
+#| label: query-1
+# your query here
+```
+
+# Session 2: STAC and NDVI
+
+In Session 1 the query was `filter`, `group`, `summarise`. Satellite imagery needs a different kind of query, in two steps:
+
+1.  **Search a catalogue** for scenes: which images cover my place, in my time window, with little cloud?
+2.  **Read a window** of pixels from the files you picked, and nothing else.
+
+```{r}
+#| label: s2-setup
+library(rstac)
+library(terra)
+```
+
+## The idea: COGs and STAC
+
+A **Cloud Optimized GeoTIFF (COG)** is an ordinary GeoTIFF (raster) arranged so that a small window can be read with a few range requests. Sentinel-2 scenes are stored this way on S3. A single band of a single scene is a large file, but we can read a small part of it.
+
+A **STAC** catalogue (SpatioTemporal Asset Catalog) is a standard layout that lets you search for those files. It has four levels:
+
+- **Catalog**: the entry point (a URL).
+- **Collection**: a dataset, such as "Sentinel-2 Level-2A".
+- **Item**: one scene, with metadata such as date and cloud cover.
+- **Asset**: an actual file inside an item, such as the red band.
+
+### How to find data in a STAC catalogue
+
+STAC catalogues are published by data providers. Some useful public catalogues are:
+
+- [Earth Search](https://stacindex.org/catalogs/earth-search#/), used here for Sentinel-2 and Landsat imagery.
+- [Microsoft Planetary Computer](https://stacindex.org/catalogs/microsoft-pc#/), which indexes many environmental datasets.
+- [Google Earth Engine](https://stacindex.org/catalogs/google-earth-engine#/)
+
+The catalogue URL is an entry point, not an image URL. A normal search follows this path:
+
+1.  Inspect the catalogue's **collections**.
+2.  Choose a collection ID, such as `sentinel-2-l2a`.
+3.  Search by place and time to get matching **items**.
+4.  Choose one item and open the **assets** you need, such as red and near-infrared bands.
+
+::: {.callout-note title="What to change for a new question"}
+Most of the STAC code can stay unchanged. Usually you change only `bbox` (place), `dates` (time), `max_cloud` (quality), and sometimes the collection ID (dataset).
+:::
+
+## Try it: query the catalogue
+
+First, connect to Earth Search and ask which collections it contains. The response is nested metadata, so `map_chr()` extracts each collection's ID and title into a tibble that we can filter with `dplyr`.
+
+```{r}
+#| label: stac-catalog
+stac_url <- "https://earth-search.aws.element84.com/v1"
+
+cols <- stac(stac_url) |> collections() |> get_request()
+
+collections_df <- tibble(
+  id    = map_chr(cols$collections, "id"),
+  title = map_chr(cols$collections, "title", .default = "")
+)
+
+collections_df |> filter(grepl("sentinel", id))
+```
+
+Now define the search inputs. **These are the values students should edit.** A bounding box is written as west, south, east, and north in longitude and latitude.
+
+```{r}
+#| label: ndvi-params
+# Default: Zurich, the Uetliberg and the lake shore
+bbox  <- c(xmin = 8.45, ymin = 47.30, xmax = 8.60, ymax = 47.40)
+# Costa Rica example: c(xmin = -84.20, ymin = 10.20, xmax = -84.05, ymax = 10.35)
+start_date <- "2023-06-01"
+end_date   <- "2023-08-31"
+dates      <- paste0(start_date, "T00:00:00Z/", end_date, "T23:59:59Z")
+max_cloud <- 50   # percent
+```
+
+
+The search has two stages. `stac_search()` describes the request; `post_request()` sends it to the catalogue. The catalogue returns metadata about matching scenes, not all their pixels.
+
+```{r}
+#| label: ndvi-search
+dates
+search <- stac(stac_url) |>
+  stac_search(
+    collections = "sentinel-2-l2a",
+    bbox        = unname(bbox),
+    datetime    = dates,
+    limit       = 100
+  )
+
+search                          # prints the query: nothing has been sent yet
+
+res   <- post_request(search)   # now it runs
+feats <- res$features           # one element per scene (item)
+length(feats)
+```
+
+Each feature is one STAC item, or satellite scene. The next chunk makes a simple tibble with four columns: scene ID, date, cloud percentage, and whether the scene covers the study area. You do not need to memorize the `map_*()` code; focus on the resulting table and the final `filter()`.
+
+```{r}
+#| label: ndvi-items
+info <- tibble(
+  id    = map_chr(feats, "id"),
+  date  = map_chr(feats, \(f) substr(f$properties$datetime, 1, 10)) |> as.Date(),
+  cloud = map_dbl(feats, \(f) {
+    value <- f$properties$`eo:cloud_cover`
+    if (is.null(value)) NA_real_ else as.numeric(value)
+  }),
+  covers = map_lgl(feats, \(f) {
+    b <- unlist(f$bbox)
+    b[1] <= bbox[["xmin"]] && b[2] <= bbox[["ymin"]] &&
+      b[3] >= bbox[["xmax"]] && b[4] >= bbox[["ymax"]]
+  })
+)
+
+info |> filter(covers, cloud < max_cloud) |> arrange(cloud) |> head(10)
+```
+
+```{r}
+#| label: ndvi-pick
+ok <- which(info$covers & info$cloud < max_cloud)
+stopifnot("No usable scene: widen the dates or the cloud limit" = length(ok) > 0)
+
+pick <- ok[which.min(info$cloud[ok])]
+item <- feats[[pick]]
+
+item$id
+names(item$assets)   # the files (assets) inside this item
+```
+
+## Your turn 2.2: search somewhere else
+
+::: {.callout-note title="Task"}
+Search the same collection for a different place and a different season. How many scenes come back?
+:::
+
+:::: {.callout-tip title="Optional: get a bbox from a country boundary, instead of typing one" collapse="true"}
+The `bbox` above was typed by hand. You can get one from real vector data instead, using `rnaturalearth` for open, no-download-required country polygons, and the same `sf::st_bbox()` you would use on any vector layer (e.g., a protected area boundary).
+
+```{r}
+#| label: bbox-from-country
+#| eval: false
+library(rnaturalearth)
+library(sf)
+
+switzerland <- ne_countries(country = "Switzerland", scale = "medium", returnclass = "sf")
+
+bbox_ch <- st_bbox(switzerland)
+bbox_ch
+#>       xmin       ymin       xmax       ymax 
+#>   5.955911  45.818007  10.492294  47.808454
+```
+
+`st_bbox()` reads the polygon's coordinate extent in whatever CRS it is in. Natural Earth data ships in EPSG:4326 (plain longitude and latitude), which is exactly the `xmin, ymin, xmax, ymax` in degrees that `stac_search(bbox = ...)` expects, so this drops straight into the pipeline above (`unname(bbox)` still applies).
+
+A whole-country bbox is a rectangle around an irregular shape, so it always includes area outside the country's actual borders, worse for elongated or fragmented countries. For a tighter search area, use a smaller unit the same way, for example `ne_states(country = "Switzerland", returnclass = "sf") |> filter(name == "Zürich")`, or intersect the STAC results against the polygon itself afterward.
+::::
+
+```{r}
+#| label: turn-2-2
+#| eval: false
+res2 <- stac(stac_url) |>
+  stac_search(
+    collections = "___",
+    bbox        = c(___, ___, ___, ___),   # west, south, east, north
+    datetime    = "___",                   # for example "2023-01-01/2023-03-31"
+    limit       = 100
+  ) |>
+  post_request()
+
+length(res2$features)
+```
+
+::: {.callout-tip title="Solution (try first)" collapse="true"}
+``` r
+res2 <- stac(stac_url) |>
+  stac_search(
+    collections = "sentinel-2-l2a",
+    bbox        = c(-84.20, 10.20, -84.05, 10.35),
+    datetime    = "2023-01-01/2023-03-31",
+    limit       = 100
+  ) |>
+  post_request()
+length(res2$features)
+```
+:::
+
+## Try it: open the bands lazily
+
+This instructor-provided helper turns an asset URL into a raster that `terra` can read over HTTP. You do not need to rewrite it. Use `open_asset(item, "red")` whenever you want the red-band file from the chosen scene. Printing the raster reads its description, not all its pixels.
+
+```{r}
+#| label: ndvi-open
+setGDALconfig("AWS_NO_SIGN_REQUEST", "YES")   # public bucket, no credentials
+
+open_asset <- function(item, asset) {
+  href <- item$assets[[asset]]$href
+  src  <- if (startsWith(href, "s3://")) sub("^s3://", "/vsis3/", href)
+          else paste0("/vsicurl/", href)
+  rast(src)
+}
+
+red <- open_asset(item, "red")
+nir <- open_asset(item, "nir")
+red
+```
+
+Look at `dimensions`. A full Sentinel-2 tile is 10980 by 10980 pixels. We have not read any of them yet. A file-backed raster is lazy in the same way as a database table: `terra` has read the header, not the pixels.
+
+```{r}
+#| label: lazy-raster
+sources(red)    # where the pixels live: a URL, not a local file
+inMemory(red)   # FALSE: the values are not in R's memory
+```
+
+A quick look at the whole tile is cheap, because `terra` draws a coarse sample and the COG's built-in overviews supply it without reading full-resolution tiles.
+
+```{r}
+#| label: lazy-quicklook
+plot(red, main = "Whole tile, coarse overview")
+```
+
+## Try it: read only our window
+
+Our box is in longitude and latitude, but the scene is in a UTM projection. We reproject the box, then crop. Because COGs are tiled, `crop()` fetches only the tiles that overlap the window.
+
+```{r}
+#| label: ndvi-window
+bbox_to_aoi <- function(bbox) {
+  as.polygons(
+    ext(bbox[["xmin"]], bbox[["xmax"]], bbox[["ymin"]], bbox[["ymax"]]),
+    crs = "EPSG:4326"
+  )
+}
+
+aoi    <- bbox_to_aoi(bbox)
+window <- function(r) crop(r, ext(project(aoi, crs(r))))
+
+red_w <- window(red)   # this is where bytes actually move
+nir_w <- window(nir)
+
+c(window_pixels = ncell(red_w), tile_pixels = ncell(red))
+inMemory(red_w)   # TRUE: this small window is now held in R's memory
+```
+
+
+## Try it: calculate NDVI
+
+NDVI measures green vegetation:
+
+$$\mathrm{NDVI} = \frac{\mathrm{NIR} - \mathrm{Red}}{\mathrm{NIR} + \mathrm{Red}}$$
+
+Healthy vegetation reflects strongly in near-infrared and absorbs red light, so it gives values close to 1. Bare ground is near 0 and water is negative.
+
+For this exercise, we calculate NDVI directly from the cropped red and near-infrared bands. The two bands use the same stored scale, so this keeps the focus on the index and the cloud-native workflow.
+
+::: {.callout-note title="Where does the calculation happen?"}
+Earth Search is a catalogue and the S3 bucket stores files; neither service calculates NDVI for us. `crop()` first transfers only the COG tiles that overlap our small window, and R then calculates NDVI locally from those pixels. A processing service such as openEO, Sentinel Hub, or Google Earth Engine could calculate NDVI before returning a result, but that would require a different service and workflow.
+:::
+
+```{r}
+#| label: ndvi-calc
+ndvi <- (nir_w - red_w) / (nir_w + red_w)
+names(ndvi) <- "ndvi"
+global(ndvi, c("min", "mean", "max"), na.rm = TRUE)
+```
+
+::: {.callout-note title="A simplification"}
+For calibrated scientific analysis, inspect the scale and offset in the STAC `raster:bands` metadata and apply them consistently before calculating an index. We omit that processing here so we can concentrate on finding an image, reading a small window, and comparing bands.
+:::
+
+```{r}
+#| label: ndvi-plot
+plot(ndvi, range = c(-0.2, 1), col = hcl.colors(50, "YlGn", rev = TRUE),
+     main = paste("NDVI", info$date[pick]))
+```
+
+Sentinel-2 also ships a scene classification layer (`scl`). Classes 4 (vegetation), 5 (bare), 6 (water) and 7 (unclassified) are usable. Cloud, shadow and snow are not.
+
+```{r}
+#| label: ndvi-mask
+scl <- open_asset(item, "scl") |> window() |> resample(red_w, method = "near")
+
+usable     <- scl %in% c(4, 5, 6, 7)
+ndvi_clean <- mask(ndvi, usable, maskvalues = FALSE)
+
+global(ndvi_clean, "mean", na.rm = TRUE)
+hist(ndvi_clean, breaks = 40, main = "NDVI in the window", xlab = "NDVI")
+```
+
+::: {.callout-note title="Exercise 2.4"}
+Describe the NDVI histogram. Where are the peaks? Which land cover produces each?
+:::
+
+## Your turn 2.5: compute the index yourself
+
+::: {.callout-note title="Task"}
+Compute NDWI, a water index: `(green - NIR) / (green + NIR)`. Open the `green` asset, crop it, and finish the formula.
+:::
+
+```{r}
+#| label: turn-2-5
+#| eval: false
+green_w <- open_asset(item, "___") |> window()
+
+ndwi <- (___ - ___) / (___ + ___)
+plot(ndwi, main = "NDWI")
+```
+
+::: {.callout-tip title="Solution (try first)" collapse="true"}
+``` r
+green_w <- open_asset(item, "green") |> window()
+
+ndwi <- (green_w - nir_w) / (green_w + nir_w)
+plot(ndwi, main = "NDWI")
+```
+
+Water shows up bright (high NDWI) and vegetation dark.
+:::
+
+## Your query 2: investigate another place or season
+
+::: {.callout-note title="Task"}
+Choose a place you know (keep the box 10 to 20 km across) and a season or year that interests you. Change `bbox` and `dates`, then rerun the Session 2 workflow: search the catalogue, choose a clear scene, open and crop the bands, and calculate NDVI.
+
+1.  Report the **mean NDVI** of the scene.
+2.  Make an **NDVI map** and describe where values are highest and lowest.
+3.  Write two sentences: what pattern do you see, and how much of the imagery did you actually read compared with a full download?
+
+**Challenge:** repeat with another index. NBR, `(nir08 - swir22) / (nir08 + swir22)`, is used to map burned areas. Which assets do you need?
+:::
+
+Hints:
+
+- `info |> filter(covers, cloud < max_cloud) |> arrange(cloud)` lists the clearest usable scenes.
+- If no scene is usable, widen `dates` or raise `max_cloud`.
+
+```{r}
+#| label: query-2
+# your query here
+```
+
+# Session 3: Socio-political data
+
+Biodiversity data do not fall from the sky. Someone chose where to look. To ask how that relates to wealth and governance, we need country-level indicators.
+
+This session has two kinds of query:
+
+1.  **Search an indicator catalogue** to find out what exists.
+2.  **Query a local table** of indicators over time with the same `dplyr` verbs used throughout the module.
+
+```{r}
+#| label: s3-setup
+library(WDI)
+```
+
+## Try it: search the catalogue
+
+We use the World Bank's indicators through the `WDI` package. There are thousands. `WDIsearch()` is a query against the catalogue: it matches your words against indicator names.
+
+```{r}
+#| label: wdi-search
+as.data.frame(WDIsearch("government effectiveness")) |> head(5)
+as.data.frame(WDIsearch("GDP per capita, PPP"))       |> head(5)
+```
+
+## Your turn 3.1: find an indicator
+
+::: {.callout-note title="Task"}
+Search for an indicator on a topic that interests you (for example corruption, forest area, protected areas, school enrolment, inequality). Note its code.
+:::
+
+```{r}
+#| label: turn-3-1
+#| eval: false
+as.data.frame(WDIsearch("corruption")) |> head(10)
+```
+
+::: {.callout-tip title="Solution (try first)" collapse="true"}
+``` r
+as.data.frame(WDIsearch("Gini")) |> head(10)     # income inequality
+as.data.frame(WDIsearch("forest area")) |> head(10)
+```
+:::
+
+## Try it: fetch a panel
+
+We want a **panel**: one row per country per year. Each indicator is a named argument, so the columns get readable names. `extra = TRUE` adds the region and the World Bank income group.
+
+```{r}
+#| label: socio-fetch
+indicators <- c(
+  gdp_pc   = "NY.GDP.PCAP.PP.KD",   # GDP per capita, PPP (constant intl $)
+  pop      = "SP.POP.TOTL",         # population
+  area_km2 = "AG.LND.TOTL.K2",      # land area
+  gov_eff  = "GE.EST"               # government effectiveness (roughly -2.5 to 2.5)
+)
+
+socio <- WDI(country = "all", indicator = indicators,
+             start = 2000, end = 2022, extra = TRUE) |>
+  filter(region != "Aggregates")     # drop "World", "Euro area" and so on
+
+dim(socio)
+head(socio[, c("country", "iso2c", "year", "region", "income", "gdp_pc", "gov_eff")])
+```
+
+This result is small enough to fit in memory, so `socio` is an ordinary local tibble. Unlike the remote GBIF dataset, it does not need `collect()`. The tidyverse code itself looks the same.
+
+## Try it: three queries
+
+**1. Summarise by group.** Mean governance score by income group, 2022.
+
+```{r}
+#| label: q3-income
+socio |>
+  filter(year == 2022) |>
+  group_by(income) |>
+  summarise(n_countries = n(), mean_gov = mean(gov_eff, na.rm = TRUE)) |>
+  arrange(desc(mean_gov))
+```
+
+**2. Ask about what is missing.** Which regions lack GDP data in 2022? In critical data studies, the gaps are part of the finding.
+
+```{r}
+#| label: q3-missing
+socio |>
+  filter(year == 2022, is.na(gdp_pc)) |>
+  count(region, sort = TRUE)
+```
+
+**3. Compare two years.** GDP per capita in 2000 and 2022, side by side, with the ratio.
+
+```{r}
+#| label: q3-change
+change <- socio |>
+  filter(year %in% c(2000, 2022)) |>
+  group_by(iso2c, country, region) |>
+  summarise(
+    gdp_2000 = max(if_else(year == 2000, gdp_pc, NA_real_), na.rm = TRUE),
+    gdp_2022 = max(if_else(year == 2022, gdp_pc, NA_real_), na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(ratio = gdp_2022 / gdp_2000)
+
+change |> arrange(desc(ratio)) |> head(10)
+```
+
+```{r}
+#| label: q3-plot
+socio |>
+  filter(year == 2022) |>
+  ggplot(aes(gdp_pc, gov_eff, colour = region)) +
+  geom_point(alpha = 0.8) +
+  scale_x_log10(labels = scales::label_comma()) +
+  labs(x = "GDP per capita (PPP, 2022)", y = "Government effectiveness",
+       colour = NULL, title = "Wealth and governance, 2022")
+```
+
+## Your turn 3.2: the latest value per country
+
+Many indicators are missing for recent years, and different countries report in different years. A common query is "the most recent non-missing value for each country". In `dplyr`, that is filter, group, then `slice_max()`.
+
+::: {.callout-note title="Task"}
+Get the most recent year with a non-missing `gov_eff` for every country.
+:::
+
+```{r}
+#| label: turn-3-2
+#| eval: false
+latest_gov <- socio |>
+  filter(!is.na(___)) |>
+  group_by(iso2c) |>
+  slice_max(___, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(iso2c, country, region, income, year, ___)
+
+latest_gov |> count(year)
+```
+
+::: {.callout-tip title="Solution (try first)" collapse="true"}
+``` r
+latest_gov <- socio |>
+  filter(!is.na(gov_eff)) |>
+  group_by(iso2c) |>
+  slice_max(year, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(iso2c, country, region, income, year, gov_eff)
+
+latest_gov |> count(year)
+```
+:::
+
+## Your query 3: ask the indicators your own question
+
+::: {.callout-note title="Task"}
+Write a query on the panel that answers a question of your choice. You can add indicators to `indicators` (from your Your turn 3.1 search) and fetch again. Ideas:
+
+- Which **income group** has the most missing data, and for which indicators?
+- How does the **gap between regions** in GDP per capita change over time? Plot a line per region.
+- Is the relationship between wealth and governance **stronger in some regions**?
+:::
+
+Your query should have a `filter()`, a grouping, and a summary. Make one plot or table.
+
+Then write two or three sentences on the data itself:
+
+1.  Who produces this indicator, and what does it actually measure?
+2.  Which countries are missing, and what might that mean for your conclusion?
+
+```{r}
+#| label: query-3
+# your query here
+```
+
+::: {.callout-important title="A note on cloud native"}
+This table came from an API, which is fine because it is small. Cloud-native formats matter when data get big. Many gridded socio-economic products are published as COGs or Parquet, and you already have the tools: a STAC search and window read (Session 2), or `open_dataset()` and `dplyr` on a Parquet address (Session 1). The core tidyverse verbs do not change.
+:::
+
+# Session 4: Biodiversity data, society, and policy
+
+## Learning goal
+
+Investigate **one social or political dimension of biodiversity data** and explain its policy implications at any defensible scale.
+
+GBIF record counts and record density measure participation in collecting, digitising, publishing, and sharing records through GBIF. They do **not** measure biodiversity, ecological condition, monitoring quality, or the completeness of biodiversity knowledge. A high count can reflect active institutions, citizen-science communities, historical collections, digitisation programmes, or data-sharing norms. A low count can reflect limited resources or access, but also publishing choices, taxonomic priorities, uneven sampling, missing metadata, or knowledge held outside GBIF.
+
+## A political ecology of data lens
+
+Nost and Goldstein argue that environmental data do not simply provide an objective view of the planet. Data are **material, governed, and practiced**: they depend on devices, platforms, labour, standards, institutions, funding, and physical infrastructure. These arrangements influence what becomes visible, whose knowledge becomes authoritative, and which environmental problems can be acted on.
+
+Use that lens throughout this session. Instead of asking only, "What pattern is in the data?", also ask:
+
+- **Production:** Who collected, classified, digitised, and published these records? Whose knowledge is absent?
+- **Infrastructure:** Which platforms, standards, technologies, and resources make these data possible?
+- **Governance:** Who sets the categories and rules, controls access, and decides how the data may be used?
+- **Effects:** What places, species, or problems become visible to policy, and what remains difficult to see?
+
+The cloud workflow in this module is part of this politics, not merely a technical convenience. Public Parquet files, APIs, catalogues, computing access, and shared taxonomic standards expand who can analyse biodiversity data, while also concentrating decisions in particular institutions and infrastructures.
+
+## Choose a dimension and scale
+
+Possible dimensions and questions include:
+
+- **Wealth and resources:** Do places with more financial or institutional resources share more records on GBIF?
+- **Governance and institutions:** How do public agencies, museums, universities, or policy systems shape publication?
+- **Access and infrastructure:** Where might internet access, digitisation capacity, transport, or cloud access matter?
+- **Geography:** How do area, remoteness, terrain, or proximity to research centres shape the pattern?
+- **Whose knowledge is represented:** Which communities and knowledge systems appear in GBIF, and which do not?
+- **Taxonomic attention:** Are some taxa recorded and shared much more often than others?
+
+A defensible scale might be countries, world regions, one country or local area, taxonomic groups, or institutions and publishers.
+
+## Worked example: resources and national record density
+
+This example asks: **Is national GDP per capita associated with the density of records shared through GBIF?** It uses `country_counts` from Session 1 and `socio` from Session 3. The comparison is descriptive; it does not test whether wealth causes data collection and sharing.
+
+First, make one 2022 socio-political table. We retain the country identifier, GDP per capita, land area, and region. Restricting the analysis to a named year makes the comparison easy to describe and reproduce.
+
+```{r}
+#| label: latest-socio
+latest_socio <- socio |>
+  filter(year == 2022) |>
+  select(iso2c, country, region, gdp_pc, area_km2)
+```
+
+Next, join the two-letter GBIF `countrycode` to the World Bank `iso2c`. The pipeline keeps countries with positive GDP and land area because `log10()` is undefined for nonpositive values and record density needs a non-missing, positive denominator. It then calculates records per 1,000 square kilometres and log GDP per capita.
+
+```{r}
+#| label: national-record-density
+national_comparison <- country_counts |>
+  left_join(latest_socio, by = c("countrycode" = "iso2c")) |>
+  filter(
+    !is.na(area_km2), area_km2 > 0,
+    !is.na(gdp_pc), gdp_pc > 0
+  ) |>
+  mutate(
+    records_per_1000_km2 = n_records / area_km2 * 1000,
+    log10_gdp_pc = log10(gdp_pc)
+  )
+
+national_comparison |>
+  select(country, region, n_records, records_per_1000_km2, gdp_pc) |>
+  arrange(desc(records_per_1000_km2)) |>
+  head(10)
+```
+
+Finally, each point is one country, and colour supplies regional context. The logarithm spreads out countries across the GDP axis; the record-density axis remains in records per 1,000 square kilometres.
+
+```{r}
+#| label: plot-record-density-gdp
+national_comparison |>
+  ggplot(aes(log10_gdp_pc, records_per_1000_km2, colour = region)) +
+  geom_point(alpha = 0.75) +
+  labs(
+    x = "Log10 GDP per capita (PPP, 2022)",
+    y = "GBIF records per 1,000 km2",
+    colour = NULL,
+    title = "National resources and participation in GBIF data sharing"
+  )
+```
+
+Read the plot as evidence about **records shared through GBIF**, not about how much biodiversity countries contain. An upward pattern would be consistent with an association between resources and participation in data collection or sharing, but it would not show that GDP caused the pattern. Region, institutional history, country area, sampling effort, citizen science, taxonomic focus, and publication practices are among the alternative explanations. Countries excluded because GDP or area is missing are also part of the data story and should be reported.
+
+## Policy interpretation
+
+1.  **Observed pattern:** State what the figure or table shows at its actual scale.
+2.  **Data politics:** Use one idea from Nost and Goldstein to explain how production, infrastructure, governance, or visibility could shape the pattern.
+3.  **Policy relevance:** Explain what an agency, funder, publisher, or community might investigate or change, and whose interests that action could serve.
+4.  **Limits and alternatives:** Identify missing data, measurement choices, absent knowledge, and other explanations.
+
+## Your query 4: social and political inquiry
+
+::: {.callout-note title="Task"}
+Investigate one social or political dimension of biodiversity data. Produce one focused analysis and a short policy interpretation.
+:::
+
+Your submission must include:
+
+1.  One social or political dimension and one clear question.
+2.  The data producer or publisher for each source and a defensible scale.
+3.  One GBIF summary.
+4.  One comparison or join, if it helps answer the question.
+5.  One figure or table.
+6.  A three-to-five-sentence policy interpretation using the framework above and explicitly relating your result to one idea from *A political ecology of data*.
+7.  At least two limitations.
+8.  A two-to-three-minute presentation of your results (with your partner).
+
+## Present your results
+
+At the end, give a **two-to-three-minute presentation** with your partner. Show your main figure or table and briefly explain:
+
+1.  Your question and the scale of your analysis.
+2.  The most important pattern you found.
+3.  How one idea from *A political ecology of data* helps interpret that pattern.
+4.  One policy implication and one important limitation.
+
+Keep the focus on your claim rather than walking through the code. Both partners should speak.
+
+## Read more
+
+- Nost, E. and Goldstein, J. E. (2022). [*A political ecology of data*](https://doi.org/10.1177/25148486211043503). The paper explains why environmental data should be studied as material infrastructures, governed systems, and situated practices rather than neutral representations.
+- [GBIF technical documentation for data use](https://techdocs.gbif.org/en/data-use/) explains access, interpretation, and responsible use of GBIF-mediated data.
+- [KM-GBF Target 21](https://www.cbd.int/gbf/targets/21) concerns access to the best available biodiversity data, information, and knowledge. GBIF record summaries can inform discussion of one part of this broader target, but they are not themselves a complete measure of Target 21.
+
+## When something fails
+
+- **Timeouts or "could not connect".** Re-run the network check at the top. If a host is blocked, tell the instructor.
+- **"Out of memory".** Filter and summarise before `collect()`. Do not collect the full GBIF dataset....its too big for memory.
+- **No STAC items.** Widen `dates`, raise `max_cloud`, or enlarge the `bbox`.
+- **Weird NDVI values (outside -1 to 1).** Check the scale and offset step, and confirm you masked clouds.
+- **A cached result is stale.** Delete the file in the `cache` folder and re-run the chunk. Cached files are named by taxon and cell size, so changing those parameters recomputes them.
