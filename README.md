@@ -61,7 +61,20 @@ Do not call `collect()` on the full GBIF dataset. The module saves selected smal
 
 ## Final output
 
-With your partner, complete one analysis of a social or political dimension of biodiversity data. Submit your question, code, figure or table, short policy interpretation, and at least two limitations. Relate your interpretation to one idea from *A political ecology of data* and present the result in two to three minutes.
+With your partner, complete one analysis of a social or political dimension of biodiversity data. Submit your question, code, figure or table, short policy interpretation, and at least two limitations. Relate your interpretation to one idea from *A political ecology of data* and present the result in three minutes.
+
+## (Un)grading rubric
+
+This rubric is for reflection and feedback, not for adding up points. Use it to identify evidence of your learning and decide what you would improve next. Productive mistakes, revisions, and well-explained limitations are evidence of learning.
+
+| Dimension | Compelling evidence | Some evidence | Not yet evident |
+|---|---|---|---|
+| **Question and scope** | The question is focused, socially or politically meaningful, and answerable at the chosen scale. | The topic is relevant, but the question or scale needs clarification. | The question is missing or cannot be answered with the selected data. |
+| **Cloud-native workflow** | The analysis finds, narrows, and reads or collects only the data needed; the group can explain where computation and transfer occur. | The workflow runs, but some choices or data movements are unclear or inefficient. | The workflow attempts to download or collect an unmanageably large dataset, or cannot be explained. |
+| **Analysis and communication** | The code is reproducible, and the figure or table clearly supports the stated finding. | The analysis is mostly reproducible, but the output or connection to the finding needs refinement. | The result cannot be reproduced or does not support the claim. |
+| **Political ecology of data** | The interpretation uses a specific idea from the reading to examine production, infrastructure, governance, visibility, or power. | The reading is mentioned, but its connection to the result remains general. | The interpretation treats the data as neutral or does not engage with the reading. |
+| **Policy interpretation and limits** | The group distinguishes observation from explanation, proposes a proportionate policy implication, and discusses at least two meaningful limitations. | A policy implication and limitations are present but need stronger links to the evidence. | The analysis makes causal or policy claims beyond what the evidence supports, or omits limitations. |
+| **Collaboration and presentation** | Both partners can explain the workflow and decisions; the three-minute presentation communicates the question, finding, interpretation, and an important limitation. | Participation or explanation is uneven, or one required presentation element is unclear. | One person cannot explain the work, or the presentation does not communicate the central result. |
 
 ## Render the document
 

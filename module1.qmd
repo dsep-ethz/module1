@@ -200,20 +200,6 @@ names(gbif)   # column names only; no occurrence records are downloaded
 Scan the columns. Which would you use to (a) filter by taxon, (b) filter by place, (c) filter by time, (d) judge data quality?
 :::
 
-Ask Arrow to count the records. `summarise()` creates a one-row answer on S3; `collect()` brings that one row into R.
-
-```{r}
-#| label: gbif-count
-
-system.time({ #check how long the query takes
-  total_records <- gbif |>
-    summarise(n = n()) |>
-    collect()
-})
-
-total_records
-```
-
 Peek at five rows while selecting only useful columns.
 
 ```{r}
@@ -243,6 +229,8 @@ Read the pipeline from top to bottom:
 
 ```{r}
 #| label: gbif-country
+arrow::set_io_thread_count(32)   # default is often just 8
+
 cache <- "cache/country_counts.rds"
 
 if (file.exists(cache)) {
@@ -861,7 +849,7 @@ This table came from an API, which is fine because it is small. Cloud-native for
 
 ## Learning goal
 
-Investigate **one social or political dimension of biodiversity data** and explain its policy implications at any defensible scale.
+Investigate **one social or political dimension of biodiversity data** and explain its policy implications.
 
 GBIF record counts and record density measure participation in collecting, digitising, publishing, and sharing records through GBIF. They do **not** measure biodiversity, ecological condition, monitoring quality, or the completeness of biodiversity knowledge. A high count can reflect active institutions, citizen-science communities, historical collections, digitisation programmes, or data-sharing norms. A low count can reflect limited resources or access, but also publishing choices, taxonomic priorities, uneven sampling, missing metadata, or knowledge held outside GBIF.
 
@@ -869,14 +857,14 @@ GBIF record counts and record density measure participation in collecting, digit
 
 Nost and Goldstein argue that environmental data do not simply provide an objective view of the planet. Data are **material, governed, and practiced**: they depend on devices, platforms, labour, standards, institutions, funding, and physical infrastructure. These arrangements influence what becomes visible, whose knowledge becomes authoritative, and which environmental problems can be acted on.
 
-Use that lens throughout this session. Instead of asking only, "What pattern is in the data?", also ask:
+Use that lens throughout this session. Instead of asking only, "What pattern is in the data?", you might also ask:
 
 - **Production:** Who collected, classified, digitised, and published these records? Whose knowledge is absent?
 - **Infrastructure:** Which platforms, standards, technologies, and resources make these data possible?
 - **Governance:** Who sets the categories and rules, controls access, and decides how the data may be used?
 - **Effects:** What places, species, or problems become visible to policy, and what remains difficult to see?
 
-The cloud workflow in this module is part of this politics, not merely a technical convenience. Public Parquet files, APIs, catalogues, computing access, and shared taxonomic standards expand who can analyse biodiversity data, while also concentrating decisions in particular institutions and infrastructures.
+The cloud-native workflow in this module is part of this politics, not merely a technical convenience. Public Parquet files, APIs, catalogues, computing access, and shared taxonomic standards expand who can analyse biodiversity data, while also concentrating decisions in particular institutions and infrastructures.
 
 ## Choose a dimension and scale
 
